@@ -138,6 +138,7 @@
         <button id="startBtn" class="primary">カメラ起動</button>
         <button id="calibrateBtn" disabled>キャリブレーション</button>
         <button id="togglePreviewBtn" disabled>プレビュー非表示</button>
+        <button id="testSensorBtn">センサーテスト</button>
       </div>
     </div>
 
@@ -167,6 +168,9 @@
           <div style="margin-top:8px; padding:8px; background:#f1f5f9; border-radius:6px;">
             <strong>首の傾き = (90 - φ) + θ</strong><br>
             <span id="calculation">= (90 - --) + -- = --°</span>
+          </div>
+          <div style="margin-top:8px; padding:4px 8px; background:#fef3c7; border-radius:4px; font-size:11px;">
+            <div>デバッグ: beta=<span id="debugBeta">--</span> gamma=<span id="debugGamma">--</span></div>
           </div>
         </div>
       </div>
@@ -251,37 +255,74 @@
     // ========================================
     function startOrientationTracking() {
       if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-        // iOS 13+ の場合は許可が必要
+        // iOS 13+ の場合は許可が必要（ユーザーアクション後に実行）
         DeviceOrientationEvent.requestPermission()
           .then(permissionState => {
             if (permissionState === 'granted') {
-              window.addEventListener('deviceorientation', handleOrientation);
+              window.addEventListener('deviceorientation', handleOrientation, true);
+              console.log('デバイスの傾き検出を開始しました（iOS）');
             } else {
               alert('デバイスの傾き検出の許可が必要です');
             }
           })
-          .catch(console.error);
+          .catch(err => {
+            console.error('許可リクエストエラー:', err);
+            alert('デバイスの傾き検出の許可に失敗しました');
+          });
       } else {
         // Android または iOS 12以下
-        window.addEventListener('deviceorientation', handleOrientation);
+        window.addEventListener('deviceorientation', handleOrientation, true);
+        console.log('デバイスの傾き検出を開始しました（Android）');
       }
     }
 
     function handleOrientation(event) {
-      // beta: 前後の傾き (-180 ~ 180)
-      // gamma: 左右の傾き (-90 ~ 90)
-      const beta = event.beta || 0;
-      const gamma = event.gamma || 0;
+      // beta: 前後の傾き (-180 ~ 180) X軸周りの回転
+      // gamma: 左右の傾き (-90 ~ 90) Y軸周りの回転
+      // alpha: 方位 (0 ~ 360) Z軸周りの回転
 
-      // スマホを縦に持っている場合、betaが傾きの主要な指標
-      // 0° = 垂直, 90° = 水平 (画面が上)
-      phoneTiltAngle = Math.abs(beta);
+      const beta = event.beta;
+      const gamma = event.gamma;
+      const alpha = event.alpha;
 
-      // 90度を超えた場合の補正（画面が下向きの場合）
-      if (phoneTiltAngle > 90) {
-        phoneTiltAngle = 180 - phoneTiltAngle;
+      // デバッグ情報を表示
+      document.getElementById('debugBeta').textContent = beta !== null ? beta.toFixed(1) + '°' : 'null';
+      document.getElementById('debugGamma').textContent = gamma !== null ? gamma.toFixed(1) + '°' : 'null';
+
+      // nullチェック
+      if (beta === null || gamma === null) {
+        document.getElementById('phoneTilt').textContent = 'センサー未対応';
+        return;
       }
 
+      // 画面の向きを取得（portrait: 縦持ち, landscape: 横持ち）
+      const orientation = window.screen.orientation?.type || 'portrait-primary';
+      const isPortrait = orientation.includes('portrait');
+
+      let tilt;
+
+      if (isPortrait) {
+        // 縦持ちの場合: betaを使用
+        // beta = 0: デバイスが水平（画面が上向き）
+        // beta = 90: デバイスが垂直（画面が正面）
+        // beta = 180 or -180: デバイスが水平（画面が下向き）
+
+        // betaを0-90の範囲に正規化（スマホの傾きとして解釈）
+        if (beta >= 0 && beta <= 90) {
+          tilt = beta;
+        } else if (beta > 90 && beta <= 180) {
+          tilt = 180 - beta;
+        } else if (beta < 0 && beta >= -90) {
+          tilt = Math.abs(beta);
+        } else {
+          tilt = 180 + beta;
+        }
+      } else {
+        // 横持ちの場合: gammaを使用
+        tilt = Math.abs(gamma);
+      }
+
+      phoneTiltAngle = tilt;
       document.getElementById('phoneTilt').textContent = phoneTiltAngle.toFixed(1) + '°';
     }
 
@@ -477,6 +518,31 @@
       } else {
         cameraPair.classList.add('hidden');
         togglePreviewBtn.textContent = 'プレビュー表示';
+      }
+    });
+
+    // センサーテストボタン
+    document.getElementById('testSensorBtn').addEventListener('click', () => {
+      // センサーのみを起動（カメラなし）
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        // iOS 13+
+        DeviceOrientationEvent.requestPermission()
+          .then(permissionState => {
+            if (permissionState === 'granted') {
+              window.addEventListener('deviceorientation', handleOrientation, true);
+              alert('センサーを起動しました。デバイスを傾けて、デバッグ情報（beta, gamma）を確認してください。');
+            } else {
+              alert('デバイスの傾き検出の許可が必要です');
+            }
+          })
+          .catch(err => {
+            console.error('許可リクエストエラー:', err);
+            alert('エラー: ' + err.message);
+          });
+      } else {
+        // Android
+        window.addEventListener('deviceorientation', handleOrientation, true);
+        alert('センサーを起動しました。デバイスを傾けて、デバッグ情報（beta, gamma）を確認してください。');
       }
     });
 
