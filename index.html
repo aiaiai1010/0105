@@ -121,3 +121,441 @@
       background: #000;
     }
   </style>
+</head>
+<body>
+  <header>
+    <h1>📱 スマートフォン姿勢判定（個人差対応版）</h1>
+  </header>
+
+  <main>
+    <!-- カメラ映像とキャンバス -->
+    <div class="stage">
+      <div class="pair" id="cameraPair">
+        <video id="video" playsinline autoplay></video>
+        <canvas id="canvas"></canvas>
+      </div>
+      <div class="controls">
+        <button id="startBtn" class="primary">カメラ起動</button>
+        <button id="calibrateBtn" disabled>キャリブレーション</button>
+        <button id="togglePreviewBtn" disabled>プレビュー非表示</button>
+      </div>
+    </div>
+
+    <!-- 姿勢判定結果 -->
+    <div class="panel">
+      <h2 style="margin-top:0; font-size:18px;">📊 姿勢判定結果</h2>
+      <div id="warning" class="bad">待機中...</div>
+
+      <div style="margin-top: 16px;">
+        <div class="row">
+          <div>
+            <div class="hint">首の傾き (Head Tilt)</div>
+            <div class="mono" style="font-size:24px; font-weight:700;" id="neckTilt">--°</div>
+          </div>
+          <div>
+            <div class="hint">判定</div>
+            <div class="mono" style="font-size:20px; font-weight:600;" id="posture">--</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top: 16px; padding-top: 16px; border-top: 1px solid #eee;">
+        <h3 style="margin:0 0 8px; font-size:15px; color:#666;">📐 計算詳細</h3>
+        <div class="mono" style="font-size:13px; color:#555; line-height:1.6;">
+          <div><span class="badge">φ (スマホの傾き)</span> <span id="phoneTilt">--°</span></div>
+          <div><span class="badge">θ (顔の向き)</span> <span id="faceTilt">--°</span></div>
+          <div style="margin-top:8px; padding:8px; background:#f1f5f9; border-radius:6px;">
+            <strong>首の傾き = (90 - φ) + θ</strong><br>
+            <span id="calculation">= (90 - --) + -- = --°</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 感度調整 -->
+    <div class="panel">
+      <div class="sensitivity-section">
+        <h3>⚙️ 感度調整</h3>
+        <div class="slider-row">
+          <label>良い姿勢の閾値:</label>
+          <input type="range" id="goodThreshold" min="0" max="45" value="20" step="1">
+          <span class="slider-value"><span id="goodThresholdVal">20</span>°</span>
+        </div>
+        <div class="slider-row">
+          <label>悪い姿勢の閾値:</label>
+          <input type="range" id="badThreshold" min="20" max="90" value="45" step="1">
+          <span class="slider-value"><span id="badThresholdVal">45</span>°</span>
+        </div>
+        <div class="preset-row">
+          <button onclick="applyPreset('strict')">厳しめ</button>
+          <button onclick="applyPreset('normal')">標準</button>
+          <button onclick="applyPreset('loose')">ゆるめ</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- YouTube連動 -->
+    <div class="panel">
+      <h2 style="margin-top:0; font-size:18px;">📺 YouTube連動（オプション）</h2>
+      <div>
+        <input type="url" id="ytUrl" placeholder="YouTube URLを入力..." />
+      </div>
+      <div class="yt-controls">
+        <button onclick="loadYouTube()">読込</button>
+        <button onclick="playYouTube()">再生</button>
+        <button onclick="pauseYouTube()">一時停止</button>
+      </div>
+      <div id="ytContainer" style="display:none; margin-top:12px;">
+        <iframe id="ytPlayer" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"></iframe>
+      </div>
+    </div>
+  </main>
+
+  <!-- MediaPipe FaceMesh -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+  <!-- YouTube API -->
+  <script src="https://www.youtube.com/iframe_api"></script>
+
+  <script>
+    // ========================================
+    // グローバル変数
+    // ========================================
+    let faceMesh;
+    let camera;
+    let ytPlayer = null;
+    let isCalibrated = false;
+    let baselineFaceTilt = 0; // キャリブレーション時の顔の向き
+
+    // センサーデータ
+    let phoneTiltAngle = 0;  // φ: スマホの傾き
+    let faceTiltAngle = 0;   // θ: 顔の向き (補正後)
+    let neckTiltAngle = 0;   // 首の傾き (計算結果)
+
+    // 閾値
+    let goodThreshold = 20;
+    let badThreshold = 45;
+
+    // UI要素
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const startBtn = document.getElementById('startBtn');
+    const calibrateBtn = document.getElementById('calibrateBtn');
+    const togglePreviewBtn = document.getElementById('togglePreviewBtn');
+    const warning = document.getElementById('warning');
+
+    // ========================================
+    // デバイスの傾きセンサー (φ)
+    // ========================================
+    function startOrientationTracking() {
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        // iOS 13+ の場合は許可が必要
+        DeviceOrientationEvent.requestPermission()
+          .then(permissionState => {
+            if (permissionState === 'granted') {
+              window.addEventListener('deviceorientation', handleOrientation);
+            } else {
+              alert('デバイスの傾き検出の許可が必要です');
+            }
+          })
+          .catch(console.error);
+      } else {
+        // Android または iOS 12以下
+        window.addEventListener('deviceorientation', handleOrientation);
+      }
+    }
+
+    function handleOrientation(event) {
+      // beta: 前後の傾き (-180 ~ 180)
+      // gamma: 左右の傾き (-90 ~ 90)
+      const beta = event.beta || 0;
+      const gamma = event.gamma || 0;
+
+      // スマホを縦に持っている場合、betaが傾きの主要な指標
+      // 0° = 垂直, 90° = 水平 (画面が上)
+      phoneTiltAngle = Math.abs(beta);
+
+      // 90度を超えた場合の補正（画面が下向きの場合）
+      if (phoneTiltAngle > 90) {
+        phoneTiltAngle = 180 - phoneTiltAngle;
+      }
+
+      document.getElementById('phoneTilt').textContent = phoneTiltAngle.toFixed(1) + '°';
+    }
+
+    // ========================================
+    // 顔検出と顔の向き計算 (θ)
+    // ========================================
+    async function initFaceMesh() {
+      faceMesh = new FaceMesh({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+        }
+      });
+
+      faceMesh.setOptions({
+        maxNumFaces: 1,
+        refineLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      faceMesh.onResults(onFaceMeshResults);
+
+      // カメラ起動
+      camera = new Camera(video, {
+        onFrame: async () => {
+          await faceMesh.send({ image: video });
+        },
+        width: 640,
+        height: 480
+      });
+
+      await camera.start();
+
+      startBtn.disabled = true;
+      calibrateBtn.disabled = false;
+      togglePreviewBtn.disabled = false;
+
+      // デバイス傾きセンサー起動
+      startOrientationTracking();
+    }
+
+    function onFaceMeshResults(results) {
+      // キャンバスをクリア
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 顔が検出された場合
+      if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+        const landmarks = results.multiFaceLandmarks[0];
+
+        // 顔のランドマークを描画
+        drawFaceLandmarks(landmarks);
+
+        // 顔の向き（上下）を計算
+        calculateFaceTilt(landmarks);
+
+        // 首の傾きを計算
+        calculateNeckTilt();
+
+        // 姿勢を判定
+        updatePostureWarning();
+      } else {
+        warning.textContent = '顔が検出されません';
+        warning.className = 'bad';
+      }
+
+      ctx.restore();
+    }
+
+    function drawFaceLandmarks(landmarks) {
+      // 顔の輪郭を描画
+      ctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+      for (const landmark of landmarks) {
+        const x = landmark.x * canvas.width;
+        const y = landmark.y * canvas.height;
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+
+      // 鼻先 (index 1)
+      const nose = landmarks[1];
+      ctx.fillStyle = 'rgba(255, 0, 0, 0.8)';
+      ctx.beginPath();
+      ctx.arc(nose.x * canvas.width, nose.y * canvas.height, 5, 0, 2 * Math.PI);
+      ctx.fill();
+
+      // 額 (index 10)
+      const forehead = landmarks[10];
+      ctx.fillStyle = 'rgba(0, 0, 255, 0.8)';
+      ctx.beginPath();
+      ctx.arc(forehead.x * canvas.width, forehead.y * canvas.height, 5, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+
+    function calculateFaceTilt(landmarks) {
+      // 顔の向き（上下）を計算
+      // 鼻先 (landmark 1) と 額 (landmark 10) の位置関係から計算
+      const nose = landmarks[1];
+      const forehead = landmarks[10];
+
+      // Y座標の差分（画面座標系では上がマイナス）
+      const deltaY = forehead.y - nose.y;
+
+      // 顔の高さの基準（顔の上下の距離）
+      const faceHeight = Math.abs(landmarks[152].y - landmarks[10].y); // 顎から額
+
+      // 正規化した傾き（-1 ~ 1）
+      const normalizedTilt = deltaY / faceHeight;
+
+      // 角度に変換 (-45° ~ 45° の範囲に制限)
+      let rawFaceTilt = normalizedTilt * 60; // スケール調整
+      rawFaceTilt = Math.max(-45, Math.min(45, rawFaceTilt));
+
+      // キャリブレーション補正を適用
+      faceTiltAngle = rawFaceTilt - baselineFaceTilt;
+
+      document.getElementById('faceTilt').textContent = faceTiltAngle.toFixed(1) + '°';
+    }
+
+    // ========================================
+    // 首の傾き計算 (メイン計算式)
+    // ========================================
+    function calculateNeckTilt() {
+      // 公式: 首の傾き = (90 - φ) + θ
+      // φ = スマホの傾き
+      // θ = 顔の向き
+      neckTiltAngle = (90 - phoneTiltAngle) + faceTiltAngle;
+
+      document.getElementById('neckTilt').textContent = neckTiltAngle.toFixed(1) + '°';
+
+      // 計算式の詳細表示
+      const calcDetail = `= (90 - ${phoneTiltAngle.toFixed(1)}) + ${faceTiltAngle.toFixed(1)} = ${neckTiltAngle.toFixed(1)}°`;
+      document.getElementById('calculation').textContent = calcDetail;
+    }
+
+    // ========================================
+    // 姿勢判定
+    // ========================================
+    function updatePostureWarning() {
+      const absTilt = Math.abs(neckTiltAngle);
+
+      if (absTilt < goodThreshold) {
+        warning.textContent = '✓ 良い姿勢です！';
+        warning.className = 'ok';
+        document.getElementById('posture').textContent = '良好';
+        document.getElementById('posture').style.color = '#16a34a';
+      } else if (absTilt < badThreshold) {
+        warning.textContent = '△ 少し姿勢が悪いです';
+        warning.className = '';
+        warning.style.color = '#f59e0b';
+        document.getElementById('posture').textContent = '注意';
+        document.getElementById('posture').style.color = '#f59e0b';
+      } else {
+        warning.textContent = '✗ 姿勢が悪いです！';
+        warning.className = 'bad';
+        document.getElementById('posture').textContent = '悪い';
+        document.getElementById('posture').style.color = '#dc2626';
+
+        // YouTube連動: 悪い姿勢の場合は一時停止
+        if (ytPlayer && typeof ytPlayer.pauseVideo === 'function') {
+          ytPlayer.pauseVideo();
+        }
+      }
+    }
+
+    // ========================================
+    // キャリブレーション
+    // ========================================
+    function calibrate() {
+      if (faceTiltAngle !== 0) {
+        baselineFaceTilt = faceTiltAngle + baselineFaceTilt;
+        isCalibrated = true;
+        alert('キャリブレーション完了！\n現在の姿勢を基準として設定しました。');
+      } else {
+        alert('顔が検出されていません。\nカメラに顔を映してからキャリブレーションしてください。');
+      }
+    }
+
+    // ========================================
+    // UI制御
+    // ========================================
+    startBtn.addEventListener('click', initFaceMesh);
+    calibrateBtn.addEventListener('click', calibrate);
+
+    togglePreviewBtn.addEventListener('click', () => {
+      const cameraPair = document.getElementById('cameraPair');
+      if (cameraPair.classList.contains('hidden')) {
+        cameraPair.classList.remove('hidden');
+        togglePreviewBtn.textContent = 'プレビュー非表示';
+      } else {
+        cameraPair.classList.add('hidden');
+        togglePreviewBtn.textContent = 'プレビュー表示';
+      }
+    });
+
+    // 閾値スライダー
+    document.getElementById('goodThreshold').addEventListener('input', (e) => {
+      goodThreshold = parseInt(e.target.value);
+      document.getElementById('goodThresholdVal').textContent = goodThreshold;
+    });
+
+    document.getElementById('badThreshold').addEventListener('input', (e) => {
+      badThreshold = parseInt(e.target.value);
+      document.getElementById('badThresholdVal').textContent = badThreshold;
+    });
+
+    // プリセット設定
+    function applyPreset(preset) {
+      switch(preset) {
+        case 'strict':
+          goodThreshold = 15;
+          badThreshold = 30;
+          break;
+        case 'normal':
+          goodThreshold = 20;
+          badThreshold = 45;
+          break;
+        case 'loose':
+          goodThreshold = 30;
+          badThreshold = 60;
+          break;
+      }
+      document.getElementById('goodThreshold').value = goodThreshold;
+      document.getElementById('goodThresholdVal').textContent = goodThreshold;
+      document.getElementById('badThreshold').value = badThreshold;
+      document.getElementById('badThresholdVal').textContent = badThreshold;
+    }
+
+    // ========================================
+    // YouTube連動
+    // ========================================
+    function loadYouTube() {
+      const url = document.getElementById('ytUrl').value;
+      const videoId = extractYouTubeID(url);
+      if (!videoId) {
+        alert('有効なYouTube URLを入力してください');
+        return;
+      }
+
+      document.getElementById('ytContainer').style.display = 'block';
+
+      if (ytPlayer) {
+        ytPlayer.loadVideoById(videoId);
+      } else {
+        ytPlayer = new YT.Player('ytPlayer', {
+          videoId: videoId,
+          playerVars: {
+            autoplay: 0,
+            controls: 1
+          }
+        });
+      }
+    }
+
+    function playYouTube() {
+      if (ytPlayer && typeof ytPlayer.playVideo === 'function') {
+        ytPlayer.playVideo();
+      }
+    }
+
+    function pauseYouTube() {
+      if (ytPlayer && typeof ytPlayer.pauseVideo === 'function') {
+        ytPlayer.pauseVideo();
+      }
+    }
+
+    function extractYouTubeID(url) {
+      const regExp = /^.*((youtu.be\/)|(v\/)|(\/u\/\w\/)|(embed\/)|(watch\?))\??v?=?([^#&?]*).*/;
+      const match = url.match(regExp);
+      return (match && match[7].length === 11) ? match[7] : null;
+    }
+  </script>
+</body>
+</html>
