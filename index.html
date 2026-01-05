@@ -30,6 +30,37 @@
     #canvas { display: none; }
     .pair.hidden { display: none; } /* カメラプレビュー非表示用 */
 
+    /* ▼ トースト通知 ▼ */
+    .toast {
+      position: fixed;
+      top: 80px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1e293b;
+      color: #fff;
+      padding: 16px 24px;
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+      z-index: 1000;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+      max-width: 90vw;
+      text-align: center;
+    }
+    .toast.show {
+      opacity: 1;
+    }
+    .toast.success {
+      background: #16a34a;
+    }
+    .toast.error {
+      background: #dc2626;
+    }
+    .toast.info {
+      background: #0ea5e9;
+    }
+
     /* ▼ 感度調整パネル ▼ */
     .sensitivity-section {
       background: #f8fafc;
@@ -123,6 +154,9 @@
   </style>
 </head>
 <body>
+  <!-- トースト通知 -->
+  <div id="toast" class="toast"></div>
+
   <header>
     <h1>📱 スマートフォン姿勢判定（個人差対応版）</h1>
   </header>
@@ -254,6 +288,19 @@
     let sensorStarted = false;
 
     // ========================================
+    // トースト通知関数
+    // ========================================
+    function showToast(message, type = 'info', duration = 3000) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.className = 'toast show ' + type;
+
+      setTimeout(() => {
+        toast.classList.remove('show');
+      }, duration);
+    }
+
+    // ========================================
     // デバイスの傾きセンサー (φ)
     // ========================================
     function startOrientationTracking() {
@@ -274,13 +321,13 @@
                 console.log('デバイスの傾き検出を開始しました（iOS）');
                 resolve();
               } else {
-                alert('デバイスの傾き検出の許可が必要です');
+                showToast('⚠ デバイスの傾き検出の許可が必要です', 'error');
                 reject(new Error('許可が拒否されました'));
               }
             })
             .catch(err => {
               console.error('許可リクエストエラー:', err);
-              alert('デバイスの傾き検出の許可に失敗しました');
+              showToast('✗ デバイスの傾き検出の許可に失敗しました', 'error');
               reject(err);
             });
         } else {
@@ -389,9 +436,10 @@
         warning.textContent = 'カメラとセンサーが起動しました';
         warning.className = '';
         warning.style.color = '#0ea5e9';
+        showToast('✓ カメラとセンサーが起動しました', 'success');
       } catch (error) {
         console.error('初期化エラー:', error);
-        alert('初期化に失敗しました: ' + error.message);
+        showToast('✗ 初期化に失敗しました: ' + error.message, 'error', 5000);
       }
     }
 
@@ -532,15 +580,16 @@
         baselineFaceTilt = faceTiltAngle + baselineFaceTilt;
         isCalibrated = true;
 
-        // UIフィードバック
-        const msg = `キャリブレーション完了！\n現在の姿勢を基準として設定しました。\n\n補正値: ${baselineFaceTilt.toFixed(1)}°`;
-        alert(msg);
+        // UIフィードバック（非ブロッキング通知）
+        const msg = `✓ キャリブレーション完了！ (補正値: ${baselineFaceTilt.toFixed(1)}°)`;
+        showToast(msg, 'success', 4000);
+
         console.log('キャリブレーション:', {
           currentFaceTilt: faceTiltAngle,
           baselineFaceTilt: baselineFaceTilt
         });
       } else {
-        alert('顔が検出されていません。\nカメラに顔を映してからキャリブレーションしてください。');
+        showToast('⚠ 顔が検出されていません', 'error', 3000);
       }
     }
 
@@ -566,10 +615,10 @@
       // センサーのみを起動（カメラなし）
       try {
         await startOrientationTracking();
-        alert('センサーを起動しました。\nデバイスを傾けて、デバッグ情報（beta, gamma）を確認してください。');
+        showToast('✓ センサー起動完了！デバッグ情報を確認してください', 'success', 4000);
       } catch (err) {
         console.error('センサー起動エラー:', err);
-        alert('センサーの起動に失敗しました: ' + err.message);
+        showToast('✗ センサーの起動に失敗しました: ' + err.message, 'error', 4000);
       }
     });
 
@@ -613,7 +662,7 @@
       const url = document.getElementById('ytUrl').value;
       const videoId = extractYouTubeID(url);
       if (!videoId) {
-        alert('有効なYouTube URLを入力してください');
+        showToast('⚠ 有効なYouTube URLを入力してください', 'error');
         return;
       }
 
@@ -621,12 +670,16 @@
 
       if (ytPlayer) {
         ytPlayer.loadVideoById(videoId);
+        showToast('✓ YouTube動画を読み込みました', 'success');
       } else {
         ytPlayer = new YT.Player('ytPlayer', {
           videoId: videoId,
           playerVars: {
             autoplay: 0,
             controls: 1
+          },
+          events: {
+            'onReady': () => showToast('✓ YouTube動画を読み込みました', 'success')
           }
         });
       }
