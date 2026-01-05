@@ -250,30 +250,47 @@
     const togglePreviewBtn = document.getElementById('togglePreviewBtn');
     const warning = document.getElementById('warning');
 
+    // センサー起動フラグ
+    let sensorStarted = false;
+
     // ========================================
     // デバイスの傾きセンサー (φ)
     // ========================================
     function startOrientationTracking() {
-      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-        // iOS 13+ の場合は許可が必要（ユーザーアクション後に実行）
-        DeviceOrientationEvent.requestPermission()
-          .then(permissionState => {
-            if (permissionState === 'granted') {
-              window.addEventListener('deviceorientation', handleOrientation, true);
-              console.log('デバイスの傾き検出を開始しました（iOS）');
-            } else {
-              alert('デバイスの傾き検出の許可が必要です');
-            }
-          })
-          .catch(err => {
-            console.error('許可リクエストエラー:', err);
-            alert('デバイスの傾き検出の許可に失敗しました');
-          });
-      } else {
-        // Android または iOS 12以下
-        window.addEventListener('deviceorientation', handleOrientation, true);
-        console.log('デバイスの傾き検出を開始しました（Android）');
+      // 既に起動済みの場合はスキップ
+      if (sensorStarted) {
+        console.log('センサーは既に起動済みです');
+        return Promise.resolve();
       }
+
+      return new Promise((resolve, reject) => {
+        if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+          // iOS 13+ の場合は許可が必要（ユーザーアクション後に実行）
+          DeviceOrientationEvent.requestPermission()
+            .then(permissionState => {
+              if (permissionState === 'granted') {
+                window.addEventListener('deviceorientation', handleOrientation, true);
+                sensorStarted = true;
+                console.log('デバイスの傾き検出を開始しました（iOS）');
+                resolve();
+              } else {
+                alert('デバイスの傾き検出の許可が必要です');
+                reject(new Error('許可が拒否されました'));
+              }
+            })
+            .catch(err => {
+              console.error('許可リクエストエラー:', err);
+              alert('デバイスの傾き検出の許可に失敗しました');
+              reject(err);
+            });
+        } else {
+          // Android または iOS 12以下
+          window.addEventListener('deviceorientation', handleOrientation, true);
+          sensorStarted = true;
+          console.log('デバイスの傾き検出を開始しました（Android）');
+          resolve();
+        }
+      });
     }
 
     function handleOrientation(event) {
@@ -330,38 +347,52 @@
     // 顔検出と顔の向き計算 (θ)
     // ========================================
     async function initFaceMesh() {
-      faceMesh = new FaceMesh({
-        locateFile: (file) => {
-          return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
-        }
-      });
+      try {
+        // デバイス傾きセンサーを先に起動
+        console.log('センサーを起動します...');
+        await startOrientationTracking();
+        console.log('センサー起動完了');
 
-      faceMesh.setOptions({
-        maxNumFaces: 1,
-        refineLandmarks: true,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
-      });
+        faceMesh = new FaceMesh({
+          locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+          }
+        });
 
-      faceMesh.onResults(onFaceMeshResults);
+        faceMesh.setOptions({
+          maxNumFaces: 1,
+          refineLandmarks: true,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5
+        });
 
-      // カメラ起動
-      camera = new Camera(video, {
-        onFrame: async () => {
-          await faceMesh.send({ image: video });
-        },
-        width: 640,
-        height: 480
-      });
+        faceMesh.onResults(onFaceMeshResults);
 
-      await camera.start();
+        // カメラ起動
+        camera = new Camera(video, {
+          onFrame: async () => {
+            await faceMesh.send({ image: video });
+          },
+          width: 640,
+          height: 480
+        });
 
-      startBtn.disabled = true;
-      calibrateBtn.disabled = false;
-      togglePreviewBtn.disabled = false;
+        console.log('カメラを起動します...');
+        await camera.start();
+        console.log('カメラ起動完了');
 
-      // デバイス傾きセンサー起動
-      startOrientationTracking();
+        startBtn.disabled = true;
+        calibrateBtn.disabled = false;
+        togglePreviewBtn.disabled = false;
+
+        // 起動完了メッセージ
+        warning.textContent = 'カメラとセンサーが起動しました';
+        warning.className = '';
+        warning.style.color = '#0ea5e9';
+      } catch (error) {
+        console.error('初期化エラー:', error);
+        alert('初期化に失敗しました: ' + error.message);
+      }
     }
 
     function onFaceMeshResults(results) {
@@ -495,10 +526,19 @@
     // キャリブレーション
     // ========================================
     function calibrate() {
-      if (faceTiltAngle !== 0) {
+      // 顔検出の確認（厳密には0でない値があれば検出されている）
+      if (faceTiltAngle !== 0 || faceMesh) {
+        // 現在の顔の傾きを基準として保存
         baselineFaceTilt = faceTiltAngle + baselineFaceTilt;
         isCalibrated = true;
-        alert('キャリブレーション完了！\n現在の姿勢を基準として設定しました。');
+
+        // UIフィードバック
+        const msg = `キャリブレーション完了！\n現在の姿勢を基準として設定しました。\n\n補正値: ${baselineFaceTilt.toFixed(1)}°`;
+        alert(msg);
+        console.log('キャリブレーション:', {
+          currentFaceTilt: faceTiltAngle,
+          baselineFaceTilt: baselineFaceTilt
+        });
       } else {
         alert('顔が検出されていません。\nカメラに顔を映してからキャリブレーションしてください。');
       }
@@ -522,27 +562,14 @@
     });
 
     // センサーテストボタン
-    document.getElementById('testSensorBtn').addEventListener('click', () => {
+    document.getElementById('testSensorBtn').addEventListener('click', async () => {
       // センサーのみを起動（カメラなし）
-      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-        // iOS 13+
-        DeviceOrientationEvent.requestPermission()
-          .then(permissionState => {
-            if (permissionState === 'granted') {
-              window.addEventListener('deviceorientation', handleOrientation, true);
-              alert('センサーを起動しました。デバイスを傾けて、デバッグ情報（beta, gamma）を確認してください。');
-            } else {
-              alert('デバイスの傾き検出の許可が必要です');
-            }
-          })
-          .catch(err => {
-            console.error('許可リクエストエラー:', err);
-            alert('エラー: ' + err.message);
-          });
-      } else {
-        // Android
-        window.addEventListener('deviceorientation', handleOrientation, true);
-        alert('センサーを起動しました。デバイスを傾けて、デバッグ情報（beta, gamma）を確認してください。');
+      try {
+        await startOrientationTracking();
+        alert('センサーを起動しました。\nデバイスを傾けて、デバッグ情報（beta, gamma）を確認してください。');
+      } catch (err) {
+        console.error('センサー起動エラー:', err);
+        alert('センサーの起動に失敗しました: ' + err.message);
       }
     });
 
